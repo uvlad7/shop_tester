@@ -3,6 +3,7 @@ require 'curb'
 require 'colorize'
 require 'ferrum'
 require 'digest/md5'
+require 'optparse'
 
 class Tester
   def initialize
@@ -11,7 +12,23 @@ class Tester
     @proxies = File.readlines('proxies', chomp: true) - @banned
     @validation = ['Pour vous permettre de naviguer correctement sur Cdiscount, il est nécessaire que le JavaScript soit activé', 'HTTP/2 429']
     setup_curl
-    generate_todos
+    OptionParser.new do |opts|
+      opts.on('-c', '--clean', 'Clean old output') do
+        ['done', 'error'].each do |directory_name|
+          Dir.mkdir(directory_name) unless File.exists?(directory_name)
+          FileUtils.rm_f Dir.glob("#{directory_name}/*")
+        end
+      end
+      opts.on('-g', '--generate', 'Generate todos') do
+        ['todo', 'done', 'error'].each do |directory_name|
+          Dir.mkdir('todo') unless File.exists?('todo')
+          FileUtils.rm_f Dir.glob('todo/*')
+          File.readlines('urls', chomp: true).each do |url|
+            save_todo(url, 0)
+          end
+        end
+      end
+    end.parse!
   end
 
   def setup_curl
@@ -26,20 +43,13 @@ class Tester
       encoding = $1 if curl_response.body_str =~ %r{<meta[^>]+content=[^>]*charset=([-a-z0-9]+)[^>]*>}mi
       curl_response.body_str.force_encoding(encoding)
     end
-    @curl.headers = File.readlines('curl', chomp: true).map { |line| line[%r{-H\s*['"](?!cookie:)(.*)['"]}, 1] }.compact
+    @curl.headers = File.readlines('curl', chomp: true).map { |line| line[%r{-H\s*['"](?!cookie:)(.*)['"]}, 1] }.compact.map { |line| line.split(': ', 2) }.to_h
     @curl.headers = {
-      'Accept-Encoding' => 'gzip,deflate,identity',
-      'Accept-Language' => 'en-us,en;q=0.5',
-      'Accept' => '*/*',
+      'accept-Encoding' => 'gzip,deflate,identity',
+      'accept-Language' => 'en-us,en;q=0.5',
+      'accept' => '*/*',
     } if @curl.headers.empty?
     @curl.on_debug { |type, data| @last_request = data if type == 2 }
-  end
-
-  def generate_todos
-    FileUtils.rm_f Dir.glob('todo/*')
-    File.readlines('urls', chomp: true)[0...500].each do |url|
-      save_todo(url, 0)
-    end
   end
 
   def hash(url)
@@ -84,7 +94,6 @@ class Tester
     @curl.proxy_url = proxy
     puts "Crawl #{url}"
     @curl.perform
-    binding.pry
     ["#{@last_request}\n#{@curl.body_str}", @curl.response_code]
   end
 
