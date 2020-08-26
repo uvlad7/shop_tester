@@ -6,11 +6,19 @@ require 'digest/md5'
 require 'optparse'
 
 class Tester
+  USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.89 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.89 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.89 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.89 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Safari/537.36',
+  ].freeze
+
   def initialize
     @seed = 'https://www.cdiscount.com'
     @banned = File.readlines('banned', chomp: true).map { |l| l.split("\t").first }
     @proxies = File.readlines('proxies', chomp: true) - @banned
-    @validation = ['Pour vous permettre de naviguer correctement sur Cdiscount, il est nécessaire que le JavaScript soit activé', 'HTTP/2 429']
+    @validation = ['Too Many Requests']
     setup_curl
     OptionParser.new do |opts|
       opts.on('-c', '--clean', 'Clean old output') do
@@ -24,6 +32,10 @@ class Tester
           Dir.mkdir('todo') unless File.exists?('todo')
           FileUtils.rm_f Dir.glob('todo/*')
           File.readlines('urls', chomp: true).each do |url|
+            save_todo(url, 0)
+            save_todo(url, 0)
+            save_todo(url, 0)
+            save_todo(url, 0)
             save_todo(url, 0)
           end
         end
@@ -43,10 +55,10 @@ class Tester
       encoding = $1 if curl_response.body_str =~ %r{<meta[^>]+content=[^>]*charset=([-a-z0-9]+)[^>]*>}mi
       curl_response.body_str.force_encoding(encoding)
     end
-    @curl.headers = File.readlines('curl', chomp: true).map { |line| line[%r{-H\s*['"](?!cookie:)(.*)['"]}, 1] }.compact.map { |line| line.split(': ', 2) }.to_h
+    # @curl.headers = File.readlines('curl', chomp: true).map { |line| line[%r{-H\s*['"](?!cookie:)(.*)['"]}, 1] }.compact.map { |line| line.split(': ', 2) }.to_h
     @curl.headers = {
-      'accept-Encoding' => 'gzip,deflate,identity',
-      'accept-Language' => 'en-us,en;q=0.5',
+      'accept-encoding' => 'gzip,deflate,identity',
+      'accept-language' => 'en-us,en;q=0.5',
       'accept' => '*/*',
     } if @curl.headers.empty?
     @curl.on_debug { |type, data| @last_request = data if type == 2 }
@@ -65,7 +77,7 @@ class Tester
 
   def ban(proxy)
     puts "Banned #{proxy}".red
-    open('banned', 'a') do |f|
+    File.open('banned', 'a') do |f|
       f.puts "#{proxy}\t#{@downloads_per_proxy}"
     end
     @banned.push(proxy)
@@ -74,12 +86,13 @@ class Tester
 
   def login(proxy)
     puts "Login started, proxy #{proxy}".yellow
-    browser = Ferrum::Browser.new(browser_path: 'chromium-browser', port: 9222, browser_options: { 'proxy-server' => proxy }, process_timeout: 30, timeout: 30, headless: true)
-
+    @user_agent = USER_AGENTS.sample
+    @curl.headers['user-agent'] = @user_agent
+    browser = Ferrum::Browser.new(browser_path: 'chromium-browser', port: 9222, browser_options: { 'proxy-server' => proxy, 'user-agent' => @user_agent }, process_timeout: 30, timeout: 230, headless: true)
     puts "Page debug url: http://localhost:9222/devtools/inspector.html?ws=localhost:9222/devtools/page/#{browser.goto('about:blank')}".green
     begin
       browser.goto(@seed)
-      sleep 20
+      (1..60).each { |i| sleep 1; break if browser.at_xpath("//div[@class='recommends-home-box__title']") }
       cookies = browser.cookies.all.values.map { |v| "#{v.name}=#{v.value}" }
     ensure
       browser.quit
@@ -92,7 +105,7 @@ class Tester
   def crawl(url, proxy)
     @curl.url = url
     @curl.proxy_url = proxy
-    puts "Crawl #{url}"
+    #puts "Crawl #{url}"
     @curl.perform
     ["#{@last_request}\n#{@curl.body_str}", @curl.response_code]
   end
@@ -119,9 +132,11 @@ class Tester
         body, code = crawl(task[:url], proxy)
         task[:attempt] += 1
       ensure
-        if [403].include?(code) || @validation.find { |w| body.include?(w) }
-          puts "Bad response, url #{task[:url]}, attempt #{task[:attempt]}".red
-          File.write("error/#{hash(task[:url])}_#{task[:attempt]}", task_to_f(task, proxy, body))
+        if [403, 400, 429].include?(code) || @validation.find { |w| body.include?(w) }
+          puts "Bad response, url #{task[:url]}, attempt #{task[:attempt]}, code #{code}".red
+          filename = "error/#{hash(task[:url])}_#{task[:attempt]}_#{Time.now.strftime('%Y-%m-%d %T')}"
+          File.write(filename, task_to_f(task, proxy, body))
+          puts "Write #{task[:url]} to #{filename}"
           ban(proxy)
           @downloads_per_proxy = 0
           proxy = load_proxy
@@ -129,8 +144,11 @@ class Tester
           save_todo(task[:url], task[:attempt] + 1) if task[:attempt] <= 5
         else
           @downloads_per_proxy += 1
-          puts "#{@downloads_per_proxy} successful downloads per proxy #{proxy}".green
-          File.write("done/#{hash(task[:url])}_#{task[:attempt]}", task_to_f(task, proxy, body))
+          proxy = load_proxy
+          puts "#{@downloads_per_proxy} successful downloads per proxy #{proxy}, code #{code}".green
+          filename = "done/#{hash(task[:url])}_#{task[:attempt]}_#{Time.now.strftime('%Y-%m-%d %T')}"
+          File.write(filename, task_to_f(task, proxy, body))
+          puts "Write #{task[:url]} to #{filename}"
         end
         File.delete(file)
       end
